@@ -7,6 +7,12 @@ class User(models.Model):
 class SongTag(models.Model):
     artist = models.CharField(max_length = 50, blank = False)
     genre = models.CharField(max_length = 50, blank = False)
-    release_year = models.PositiveSmallIntegerField(default = 0)
+    release_year = models.CharField(max_length = 50, blank = False)
+    song = models.CharField(max_length = 50, blank = False)
+    user = models.ForeignKey(User, on_delete = models.CASCADE)
+
+class Recommendation(models.Model):
+    song = models.CharField(max_length=50, blank = False)
+    artist = models.CharField(max_length = 50, blank = False)
     album = models.CharField(max_length = 50, blank = False)
     user = models.ForeignKey(User, on_delete = models.CASCADE)
