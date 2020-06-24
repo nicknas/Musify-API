@@ -2,3 +2,8 @@ djangorestframework
 dialogflow
 spotipy
 spade
+pandas
+numpy
+scikit-learn
+tensorflow == 1.15
+channels

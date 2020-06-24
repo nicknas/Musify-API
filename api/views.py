@@ -1,14 +1,17 @@
-from django.shortcuts import render
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from api.models import User
-from api.models import SongTag
 from rest_framework import status
 from google.api_core.exceptions import InvalidArgument
 from spotipy.oauth2 import SpotifyClientCredentials
-from api.agents import ChatbotAgent
+from api.agents import *
 import spotipy
 import dialogflow_v2
+
+
+chatbot_agent = ChatbotAgent("chatbot-musify@404.city", "chatbot-musify")
+personal_recommender_agent = PersonalRecommenderAgent("personal-recommender-musify@404.city",
+                                                      "personal-recommender-musify")
+popular_recommender_agent = PopularRecommenderAgent("popular-recommender-musify@404.city", "popular-recommender-musify")
 
 
 @api_view(['POST'])
@@ -16,9 +19,6 @@ def login(request):
     user_to_log = User(**request.data)
     try:
         user = User.objects.get(user_name=user_to_log.user_name, password=user_to_log.password)
-        #dummy = ChatbotAgent("chatbot-musify@404.city", "chatbot-musify")
-        #dummy.start()
-        SongTag.objects.filter(user = user).delete()
         return Response(status=status.HTTP_200_OK, data={})
     except User.DoesNotExist:
         return Response(status=status.HTTP_400_BAD_REQUEST, data={'error': 'Invalid user/password'})
@@ -29,8 +29,6 @@ def register(request):
     user_to_log = User(**request.data)
     try:
         user = User.objects.get(user_name=user_to_log.user_name)
-        #chatbot_agent = ChatbotAgent("chatbot-musify@404.city", "chatbot-musify")
-        #chatbot_agent.start()
         return Response(status=status.HTTP_400_BAD_REQUEST, data={'error': 'User exists in the app'})
     except User.DoesNotExist:
         user_to_log.save()
@@ -60,8 +58,11 @@ def request_songs(request, user):
                                                                   track['artists'][0]['name']
                 artist_full = spotify.artist(track['artists'][0]['uri'])
                 available_genres = spotify.recommendation_genre_seeds()['genres']
-                genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if genre.replace(" ", "-") in available_genres]
-                song_tag = SongTag(song = track['id'], artist = track['artists'][0]['id'], genre = genres[0] if len(genres) > 0 else '', release_year = track['album']['release_date'], user = User.objects.get(user_name=user))
+                genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
+                          genre.replace(" ", "-") in available_genres]
+                song_tag = SongTag(song=track['id'], artist=track['artists'][0]['id'],
+                                   genre=genres[0] if len(genres) > 0 else '',
+                                   release_year=track['album']['release_date'], user=User.objects.get(user_name=user))
                 song_tag.save()
 
         if response_chatbot.query_result.intent.display_name == 'Recoger artista':
@@ -78,8 +79,11 @@ def request_songs(request, user):
                         artist_full = spotify.artist(artist['uri'])
                         print(artist_full['genres'])
                         available_genres = spotify.recommendation_genre_seeds()['genres']
-                        genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if genre.replace(" ", "-") in available_genres]
-                        song_tag = SongTag(song = track['id'], artist = artist['id'], genre = genres[0] if len(genres) > 0 else '', release_year = album['release_date'], user = User.objects.get(user_name=user))
+                        genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
+                                  genre.replace(" ", "-") in available_genres]
+                        song_tag = SongTag(song=track['id'], artist=artist['id'],
+                                           genre=genres[0] if len(genres) > 0 else '',
+                                           release_year=album['release_date'], user=User.objects.get(user_name=user))
                         song_tag.save()
 
         if response_chatbot.query_result.intent.display_name == 'Recoger album':
@@ -89,12 +93,17 @@ def request_songs(request, user):
             else:
                 for album in results['albums']['items']:
                     for track in spotify.album_tracks(album['uri'], limit=10)['items']:
-                        response_chatbot.query_result.fulfillment_text += '\n -' + track['name'] + ' del álbum ' + album[
-                            'name'] + ' y artista ' + album['artists'][0]['name']
+                        response_chatbot.query_result.fulfillment_text += '\n -' + track['name'] + ' del álbum ' + \
+                                                                          album[
+                                                                              'name'] + ' y artista ' + \
+                                                                          album['artists'][0]['name']
                         artist_full = spotify.artist(album['artists'][0]['uri'])
                         available_genres = spotify.recommendation_genre_seeds()['genres']
-                        genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if genre.replace(" ", "-") in available_genres]
-                        song_tag = SongTag(song = track['id'], artist = album['artists'][0]['id'], genre = genres[0] if len(genres) > 0 else '', release_year = album['release_date'], user = User.objects.get(user_name=user))
+                        genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
+                                  genre.replace(" ", "-") in available_genres]
+                        song_tag = SongTag(song=track['id'], artist=album['artists'][0]['id'],
+                                           genre=genres[0] if len(genres) > 0 else '',
+                                           release_year=album['release_date'], user=User.objects.get(user_name=user))
                         song_tag.save()
 
         return Response(status=status.HTTP_200_OK, data={'intent': response_chatbot.query_result.intent.display_name,
@@ -102,6 +111,7 @@ def request_songs(request, user):
 
     except InvalidArgument:
         return Response(status=status.HTTP_400_BAD_REQUEST, data={"error": "Unrecognized exception"})
+
 
 @api_view(['GET'])
 def request_recommendations(request, user):
@@ -113,19 +123,36 @@ def request_recommendations(request, user):
     genres = []
     artists = []
 
-    for genre in SongTag.objects.filter(user = User.objects.get(user_name=user)).values("genre").distinct()[:2]:
-        if len(genre['genre']) > 0:
-            genres.append(genre['genre'])
+    distinct_genres = SongTag.objects.filter(user=User.objects.get(user_name=user)).values("genre").distinct()
+    distinct_artists = SongTag.objects.filter(user=User.objects.get(user_name=user)).values("artist").distinct()
 
-    for artist in SongTag.objects.filter(user = User.objects.get(user_name=user)).values("artist").distinct()[:3]:
-        artists.append(artist['artist'])
+    # Si no hay más de 2 géneros diferentes o más de 3 artistas diferentes, no tiene sentido realizar deep learning
+    if len(distinct_genres) <= 2 or len(distinct_artists) <= 3:
+        for genre in distinct_genres[:2]:
+            if len(genre['genre']) > 0:
+                genres.append(genre['genre'])
 
-    print(genres)
-    print(artists)
+        for artist in distinct_artists[:3]:
+            artists.append(artist['artist'])
+
+    else:
+        popular_recommender_agent.start().result()
+        personal_recommender_agent.start().result()
+        chatbot_agent.user = user
+        chatbot_agent.start().result()
+        chatbot_agent.request_recommendation.join()
+        result = json.loads(chatbot_agent.request_recommendation.exit_code)
+        genres = result['genres']
+        artists = result['artists']
+        chatbot_agent.stop()
+        personal_recommender_agent.stop()
+        popular_recommender_agent.stop()
+
     if len(genres) > 0 and len(artists) > 0:
         r = spotify.recommendations(seed_artists=artists, seed_genres=genres, limit=10)
         for song in r['tracks']:
             recommendations['songs'].append({'artist': song['artists'][0]['name'], 'song': song['name']})
+
         return Response(status=status.HTTP_200_OK, data=recommendations)
 
     else:
