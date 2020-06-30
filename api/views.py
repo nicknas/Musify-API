@@ -1,11 +1,8 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from google.api_core.exceptions import InvalidArgument
-from spotipy.oauth2 import SpotifyClientCredentials
 from api.agents import *
 import spotipy
-import dialogflow_v2
 
 
 chatbot_agent = ChatbotAgent("chatbot-musify@404.city", "chatbot-musify")
