@@ -1,6 +1,9 @@
+import dialogflow_v2
 import numpy
 import pandas
 import random
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 from django.db.models import Count
 from sklearn import preprocessing
 from spade import agent
@@ -8,6 +11,7 @@ from spade.behaviour import *
 import json
 import tensorflow as tf
 
+from google.api_core.exceptions import InvalidArgument
 from api.models import SongTag, User
 from channels.db import database_sync_to_async
 
@@ -21,26 +25,137 @@ class ChatbotAgent(agent.Agent):
 
             await self.send(msg)
             print("Requested recommendation to personal recommender")
-            recommendations = await self.receive(timeout=15)
+            recommendations = await self.receive(timeout=90)
             if recommendations is not None:
                 self.exit_code = recommendations.body
             else:
                 self.exit_code = "No se han podido generar recomendaciones"
 
+    class SendSongTagsSave(OneShotBehaviour):
+        async def run(self):
+            msg = Message(to="personal-recommender-musify@404.city")
+            msg.set_metadata("performative", "query")
+            msg.body = json.dumps({'user': self.user, 'user_input': self.user_input})
+            await self.send(msg)
+            response_save_tags = await self.receive(timeout=90)
+            self.exit_code = response_save_tags.body
+
     async def setup(self):
         print("Chatbot agent started")
-        b = self.SendPersonalRecommenderRequest()
-        b.user = self.user
-        self.request_recommendation = b
-        template = Template()
-        template.set_metadata("performative", "inform")
-        self.add_behaviour(b, template)
+        self.request_save_song_tags = self.SendSongTagsSave()
+        self.request_recommendation = self.SendPersonalRecommenderRequest()
 
 
 class PersonalRecommenderAgent(agent.Agent):
+    class ReceiveSaveSongTagsRequest(OneShotBehaviour):
+
+        @database_sync_to_async
+        def save_song_tag(self, song, artist, genre, release_year, user):
+            song_tag = SongTag(song=song, artist=artist, genre=genre, release_year=release_year,
+                               user=User.objects.get(user_name=user))
+            song_tag.save()
+
+        async def run(self):
+            song_tags_request_message = await self.receive(timeout=90)
+            song_tags_request = json.loads(song_tags_request_message.body)
+            client = dialogflow_v2.SessionsClient.from_service_account_json(
+                'dialog_flow_credentials/musifychatbot-qkmsfp-64a945d16557.json')
+            session = client.session_path('musifychatbot-qkmsfp', song_tags_request['user'] + '-musify_api')
+            text_input = dialogflow_v2.types.TextInput(text=song_tags_request['user_input'], language_code='es-ES')
+            query_input = dialogflow_v2.types.QueryInput(text=text_input)
+            SPOTIPY_CLIENT_ID = '63cd1c05a2de40b19d4316d23e5271bf'
+            SPOTIPY_CLIENT_SECRET = 'e0a096314a2946e4ab0c5a73f9fdd4cd'
+            spotify = spotipy.Spotify(client_credentials_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID,
+                                                                                          client_secret=SPOTIPY_CLIENT_SECRET))
+            try:
+                response_chatbot = client.detect_intent(session=session, query_input=query_input)
+                if response_chatbot.query_result.intent.display_name == 'Recoger canción':
+                    results = spotify.search(q='track:' + song_tags_request['user_input'], type='track', limit=10)
+                    if len(results['tracks']['items']) == 0:
+                        response_chatbot.query_result.fulfillment_text = "No he podido encontrar canciones para la canción que has puesto"
+                    for track in results['tracks']['items']:
+                        response_chatbot.query_result.fulfillment_text += '\n -' + track['name'] + ' del álbum ' + \
+                                                                          track['album']['name'] + ' y artista ' + \
+                                                                          track['artists'][0]['name']
+                        artist_full = spotify.artist(track['artists'][0]['uri'])
+                        available_genres = spotify.recommendation_genre_seeds()['genres']
+                        genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
+                                  genre.replace(" ", "-") in available_genres]
+
+                        if len(genres) > 0:
+                            await self.save_song_tag(song=track['id'], artist=track['artists'][0]['id'],
+                                                     genre=genres[0],
+                                                     release_year=track['album']['release_date'],
+                                                     user=song_tags_request['user'])
+
+                if response_chatbot.query_result.intent.display_name == 'Recoger artista':
+                    results = spotify.search(q='artist:' + song_tags_request['user_input'], type='artist')
+                    if len(results['artists']['items']) == 0:
+                        response_chatbot.query_result.fulfillment_text = "No he podido encontrar canciones para el artista que has puesto"
+
+                    else:
+                        artist = results['artists']['items'][0]
+                        for album in spotify.artist_albums(artist['uri'], album_type='album', limit=1)['items']:
+                            for track in spotify.album_tracks(album['uri'], limit=10)['items']:
+                                response_chatbot.query_result.fulfillment_text += '\n -' + track[
+                                    'name'] + ' del álbum ' + \
+                                                                                  album['name'] + ' y artista ' + \
+                                                                                  artist['name']
+                                artist_full = spotify.artist(artist['uri'])
+                                print(artist_full['genres'])
+                                available_genres = spotify.recommendation_genre_seeds()['genres']
+                                genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
+                                          genre.replace(" ", "-") in available_genres]
+
+                                if len(genres) > 0:
+                                    await self.save_song_tag(song=track['id'], artist=artist['id'],
+                                                             genre=genres[0],
+                                                             release_year=album['release_date'],
+                                                             user=song_tags_request['user'])
+
+                if response_chatbot.query_result.intent.display_name == 'Recoger album':
+                    results = spotify.search(q='album:' + song_tags_request['user_input'], type='album', limit=1)
+                    if len(results['albums']['items']) == 0:
+                        response_chatbot.query_result.fulfillment_text = "No he podido encontrar canciones para el álbum que has puesto"
+                    else:
+                        for album in results['albums']['items']:
+                            for track in spotify.album_tracks(album['uri'], limit=10)['items']:
+                                response_chatbot.query_result.fulfillment_text += '\n -' + track[
+                                    'name'] + ' del álbum ' + \
+                                                                                  album[
+                                                                                      'name'] + ' y artista ' + \
+                                                                                  album['artists'][0]['name']
+                                artist_full = spotify.artist(album['artists'][0]['uri'])
+                                available_genres = spotify.recommendation_genre_seeds()['genres']
+                                genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
+                                          genre.replace(" ", "-") in available_genres]
+
+                                if len(genres) > 0:
+                                    await self.save_song_tag(song=track['id'], artist=album['artists'][0]['id'],
+                                                             genre=genres[0],
+                                                             release_year=album['release_date'],
+                                                             user=song_tags_request['user'])
+
+                msg = Message(to="chatbot-musify@404.city")
+                msg.set_metadata("performative", "inform")
+                msg.body = json.dumps({'intent': response_chatbot.query_result.intent.display_name,
+                                       'response': response_chatbot.query_result.fulfillment_text})
+                await self.send(msg)
+
+            except InvalidArgument:
+                msg = Message(to="chatbot-musify@404.city")
+                msg.set_metadata("performative", "inform")
+                msg.body = json.dumps({"error": "Unrecognized exception"})
+                await self.send(msg)
+
+            receive_personal_recommendation_request = PersonalRecommenderAgent.ReceivePersonalRecommendationRequest()
+            template = Template()
+            template.set_metadata("performative", "query")
+            self.agent.add_behaviour(receive_personal_recommendation_request, template)
+
     class ReceivePersonalRecommendationRequest(OneShotBehaviour):
         async def run(self):
-            user = await self.receive(timeout=15)
+            user = await self.receive(timeout=90)
             print("Recibido el usuario " + user.body)
             b = PersonalRecommenderAgent.SendPopularRecommendationRequest()
             template = Template()
@@ -73,12 +188,12 @@ class PersonalRecommenderAgent(agent.Agent):
             msg.set_metadata("performative", "query")
             msg.body = self.user
             await self.send(msg)
-            popular_recommendation = await self.receive(timeout=15)
+            popular_recommendation = await self.receive(timeout=90)
             self.exit_code = popular_recommendation.body
 
     async def setup(self):
         print("Personal recommender agent started")
-        b = self.ReceivePersonalRecommendationRequest()
+        b = self.ReceiveSaveSongTagsRequest()
         template = Template()
         template.set_metadata("performative", "query")
         self.add_behaviour(b, template)
@@ -87,7 +202,7 @@ class PersonalRecommenderAgent(agent.Agent):
 class PopularRecommenderAgent(agent.Agent):
     class ReceivePopularRecommendationRequest(OneShotBehaviour):
         async def run(self):
-            user = await self.receive(timeout=15)
+            user = await self.receive(timeout=90)
             msg = Message(to="personal-recommender-musify@404.city")
             msg.set_metadata("performative", "inform")
             genres = await do_recommendation_train('genre', user.body, 'popular')

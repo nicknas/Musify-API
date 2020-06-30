@@ -37,80 +37,22 @@ def register(request):
 
 @api_view(['POST'])
 def request_songs(request, user):
-    client = dialogflow_v2.SessionsClient.from_service_account_json(
-        'dialog_flow_credentials/musifychatbot-qkmsfp-64a945d16557.json')
-    session = client.session_path('musifychatbot-qkmsfp', user + '-musify_api')
-    text_input = dialogflow_v2.types.TextInput(text=request.data['user_input'], language_code='es-ES')
-    query_input = dialogflow_v2.types.QueryInput(text=text_input)
-    SPOTIPY_CLIENT_ID = '63cd1c05a2de40b19d4316d23e5271bf'
-    SPOTIPY_CLIENT_SECRET = 'e0a096314a2946e4ab0c5a73f9fdd4cd'
-    spotify = spotipy.Spotify(client_credentials_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID,
-                                                                                  client_secret=SPOTIPY_CLIENT_SECRET))
-    try:
-        response_chatbot = client.detect_intent(session=session, query_input=query_input)
-        if response_chatbot.query_result.intent.display_name == 'Recoger canción':
-            results = spotify.search(q='track:' + request.data['user_input'], type='track', limit=10)
-            if len(results['tracks']['items']) == 0:
-                response_chatbot.query_result.fulfillment_text = "No he podido encontrar canciones para la canción que has puesto"
-            for track in results['tracks']['items']:
-                response_chatbot.query_result.fulfillment_text += '\n -' + track['name'] + ' del álbum ' + \
-                                                                  track['album']['name'] + ' y artista ' + \
-                                                                  track['artists'][0]['name']
-                artist_full = spotify.artist(track['artists'][0]['uri'])
-                available_genres = spotify.recommendation_genre_seeds()['genres']
-                genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
-                          genre.replace(" ", "-") in available_genres]
-                song_tag = SongTag(song=track['id'], artist=track['artists'][0]['id'],
-                                   genre=genres[0] if len(genres) > 0 else '',
-                                   release_year=track['album']['release_date'], user=User.objects.get(user_name=user))
-                song_tag.save()
 
-        if response_chatbot.query_result.intent.display_name == 'Recoger artista':
-            results = spotify.search(q='artist:' + request.data['user_input'], type='artist')
-            if len(results['artists']['items']) == 0:
-                response_chatbot.query_result.fulfillment_text = "No he podido encontrar canciones para el artista que has puesto"
+    personal_recommender_agent.start().result()
+    chatbot_agent.start().result()
+    chatbot_agent.request_save_song_tags.user = user
+    chatbot_agent.request_save_song_tags.user_input = request.data['user_input']
+    template = Template()
+    template.set_metadata("performative", "inform")
+    chatbot_agent.add_behaviour(chatbot_agent.request_save_song_tags, template)
+    chatbot_agent.request_save_song_tags.join()
+    result = json.loads(chatbot_agent.request_save_song_tags.exit_code)
 
-            else:
-                artist = results['artists']['items'][0]
-                for album in spotify.artist_albums(artist['uri'], album_type='album', limit=1)['items']:
-                    for track in spotify.album_tracks(album['uri'], limit=10)['items']:
-                        response_chatbot.query_result.fulfillment_text += '\n -' + track['name'] + ' del álbum ' + \
-                                                                          album['name'] + ' y artista ' + artist['name']
-                        artist_full = spotify.artist(artist['uri'])
-                        print(artist_full['genres'])
-                        available_genres = spotify.recommendation_genre_seeds()['genres']
-                        genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
-                                  genre.replace(" ", "-") in available_genres]
-                        song_tag = SongTag(song=track['id'], artist=artist['id'],
-                                           genre=genres[0] if len(genres) > 0 else '',
-                                           release_year=album['release_date'], user=User.objects.get(user_name=user))
-                        song_tag.save()
-
-        if response_chatbot.query_result.intent.display_name == 'Recoger album':
-            results = spotify.search(q='album:' + request.data['user_input'], type='album', limit=1)
-            if len(results['albums']['items']) == 0:
-                response_chatbot.query_result.fulfillment_text = "No he podido encontrar canciones para el álbum que has puesto"
-            else:
-                for album in results['albums']['items']:
-                    for track in spotify.album_tracks(album['uri'], limit=10)['items']:
-                        response_chatbot.query_result.fulfillment_text += '\n -' + track['name'] + ' del álbum ' + \
-                                                                          album[
-                                                                              'name'] + ' y artista ' + \
-                                                                          album['artists'][0]['name']
-                        artist_full = spotify.artist(album['artists'][0]['uri'])
-                        available_genres = spotify.recommendation_genre_seeds()['genres']
-                        genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
-                                  genre.replace(" ", "-") in available_genres]
-                        song_tag = SongTag(song=track['id'], artist=album['artists'][0]['id'],
-                                           genre=genres[0] if len(genres) > 0 else '',
-                                           release_year=album['release_date'], user=User.objects.get(user_name=user))
-                        song_tag.save()
-
-        return Response(status=status.HTTP_200_OK, data={'intent': response_chatbot.query_result.intent.display_name,
-                                                         'response': response_chatbot.query_result.fulfillment_text})
-
-    except InvalidArgument:
-        return Response(status=status.HTTP_400_BAD_REQUEST, data={"error": "Unrecognized exception"})
+    if result.get('error') is not None:
+        return Response(status=status.HTTP_400_BAD_REQUEST, data={"error": result.get('error')})
+    else:
+        return Response(status=status.HTTP_200_OK, data={'intent': result.get('intent'),
+                                                         'response': result.get('response')})
 
 
 @api_view(['GET'])
@@ -137,9 +79,10 @@ def request_recommendations(request, user):
 
     else:
         popular_recommender_agent.start().result()
-        personal_recommender_agent.start().result()
-        chatbot_agent.user = user
-        chatbot_agent.start().result()
+        chatbot_agent.request_recommendation.user = user
+        template = Template()
+        template.set_metadata("performative", "inform")
+        chatbot_agent.add_behaviour(chatbot_agent.request_recommendation, template)
         chatbot_agent.request_recommendation.join()
         result = json.loads(chatbot_agent.request_recommendation.exit_code)
         genres = result['genres']
