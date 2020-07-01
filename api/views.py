@@ -13,6 +13,11 @@ popular_recommender_agent = PopularRecommenderAgent("popular-recommender-musify@
 
 @api_view(['POST'])
 def login(request):
+    """
+    Método que representa LoginAPI
+    :param request: La petición de login por parte del usuario, en formato diccionario
+    :return: Autenticación correcta del usuario ó erronea
+    """
     user_to_log = User(**request.data)
     try:
         user = User.objects.get(user_name=user_to_log.user_name, password=user_to_log.password)
@@ -23,6 +28,11 @@ def login(request):
 
 @api_view(['POST'])
 def register(request):
+    """
+    Método que representa RegistroAPI
+    :param request: La petición de registro por parte del usuario, en formato diccionario
+    :return: Registro correcto si usuario no existe, en el caso contrario registro erroneo
+    """
     user_to_log = User(**request.data)
     try:
         user = User.objects.get(user_name=user_to_log.user_name)
@@ -34,7 +44,12 @@ def register(request):
 
 @api_view(['POST'])
 def request_songs(request, user):
-
+    """
+    Método que representa RequestSongsAPI
+    :param request: Petición de la búsqueda por parte del usuario, en formato diccionario
+    :param user: El usuario que realiza la petición
+    :return: Lista de canciones pedidas por parte del usuario. En caso contrario, se devuelve que no se ha podido encontrar canciones
+    """
     personal_recommender_agent.start().result()
     chatbot_agent.start().result()
     chatbot_agent.request_save_song_tags.user = user
@@ -54,6 +69,12 @@ def request_songs(request, user):
 
 @api_view(['GET'])
 def request_recommendations(request, user):
+    """
+    Método que representa RequestRecommendationsAPI
+    :param user: el usuario del que se pide las recomendaciones
+    :return: Lista de recomendaciones para el usuario, con todas las canciones en formato diccionario. En caso contrario, se devuelve
+    que no se han encontrado recomendaciones
+    """
     SPOTIPY_CLIENT_ID = '63cd1c05a2de40b19d4316d23e5271bf'
     SPOTIPY_CLIENT_SECRET = 'e0a096314a2946e4ab0c5a73f9fdd4cd'
     spotify = spotipy.Spotify(client_credentials_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID,

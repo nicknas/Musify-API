@@ -17,8 +17,20 @@ from channels.db import database_sync_to_async
 
 
 class ChatbotAgent(agent.Agent):
+    """
+    Clase que representa el agente Chatbot, con todos sus comportamientos
+    """
     class SendPersonalRecommenderRequest(OneShotBehaviour):
+        """
+        Clase que representa PeticiónRecomendaciones
+        """
         async def run(self):
+            """
+            Este método ejecuta la petición para pedir recomendaciones al recomendador personal
+            :return: Las recomendaciones generadas (diccionario con artistas y géneros) a partir de ambos recomendadores, en formato JSON
+            """
+
+            # Al recomendador personal se le envia el usuario que queremos pedir
             msg = Message(to="personal-recommender-musify@404.city")
             msg.set_metadata("performative", "query")
             msg.body = self.user
@@ -26,13 +38,24 @@ class ChatbotAgent(agent.Agent):
             await self.send(msg)
             print("Requested recommendation to personal recommender")
             recommendations = await self.receive(timeout=90)
+
+            # En el caso de recibir recomendaciones, las devolvemos
+            # En caso contrario mandamos error
             if recommendations is not None:
                 self.exit_code = recommendations.body
             else:
-                self.exit_code = "No se han podido generar recomendaciones"
+                self.exit_code = json.dumps({'error': "No se han podido generar recomendaciones"})
 
     class SendSongTagsSaveRequest(OneShotBehaviour):
+        """
+        Clase que representa PeticiónGuardarEtiquetas
+        """
         async def run(self):
+            """
+            Analiza la petición del usuario usando DialogFlow y le pide al recomendador personal
+            que recoja la lista de canciones acordes a la petición
+            :return: Devuelve la respuesta del chatbot con la lista de canciones
+            """
             client = dialogflow_v2.SessionsClient.from_service_account_json(
                 'dialog_flow_credentials/musifychatbot-qkmsfp-64a945d16557.json')
             session = client.session_path('musifychatbot-qkmsfp', self.user + '-musify_api')
@@ -65,6 +88,9 @@ class ChatbotAgent(agent.Agent):
                 self.exit_code = json.dumps({"error": "Unrecognized exception"})
 
     async def setup(self):
+        """
+        Inicializa el agente Chatbot, con sus comportamientos como atributos
+        """
         print("Chatbot agent started")
         self.request_save_song_tags = self.SendSongTagsSaveRequest()
         self.request_recommendation = self.SendPersonalRecommenderRequest()
@@ -72,14 +98,28 @@ class ChatbotAgent(agent.Agent):
 
 class PersonalRecommenderAgent(agent.Agent):
     class ReceiveSaveSongTagsRequest(OneShotBehaviour):
-
+        """
+        Clase que representa RecibirPeticionGuardarEtiquetas
+        """
         @database_sync_to_async
         def save_song_tag(self, song, artist, genre, release_year, user):
+            """
+            Método para guardar una etiqueta en la base de datos
+            :param song: Nombre de la canción
+            :param artist: Nombre del artista o banda
+            :param genre: Género musical
+            :param release_year: Año de lanzamiento de la canción
+            :param user: El usuario que ha buscado esa canción
+            """
             song_tag = SongTag(song=song, artist=artist, genre=genre, release_year=release_year,
                                user=User.objects.get(user_name=user))
             song_tag.save()
 
         async def run(self):
+            """
+            Método que realiza una búsqueda en spotify de las canciones según la petición del usuario
+            :return: La respuesta final del chatbot con la lista de canciones
+            """
             song_tags_request_message = await self.receive(timeout=90)
             song_tags_request = json.loads(song_tags_request_message.body)
             user = song_tags_request['user']
@@ -165,7 +205,15 @@ class PersonalRecommenderAgent(agent.Agent):
             self.agent.add_behaviour(receive_personal_recommendation_request, template)
 
     class ReceivePersonalRecommendationRequest(OneShotBehaviour):
+        """
+        Clase que representa RecibirPeticionRecomendadores
+        """
         async def run(self):
+            """
+            Método que realiza el entrenamiento de las recomendaciones personales, a su vez que inicia la petición
+            para recoger las recomendaciones populares
+            :return: Una vez mezcladas ambas recomendaciones, devuelve los géneros y artistas más buscados, en formato JSON
+            """
             user = await self.receive(timeout=90)
             print("Recibido el usuario " + user.body)
             b = PersonalRecommenderAgent.SendPopularRecommendationRequest()
@@ -187,6 +235,14 @@ class PersonalRecommenderAgent(agent.Agent):
 
         @database_sync_to_async
         def put_popular_recommendation_to_personal(self, personal_artists, personal_genres, popular_artists):
+            """
+            Método que, a partir de las recomendaciones populares, se mira las coincidencias de género,
+            entre el usuario y el resto. Si un artista de los populares tiene un mismo género que los géneros más
+            buscados por el usuario, entonces se añade este artista a la lista de artistas más buscados por el usuario
+            :param personal_artists: lista de los artistas más buscados por el usuario
+            :param personal_genres: lista de los géneros más buscados por el usuario
+            :param popular_artists: lista de los artistas más buscados por el resto de usuarios
+            """
             for artist in popular_artists:
                 genres = [g['genre'] for g in list(SongTag.objects.filter(artist=artist).values("genre"))]
                 genres_in_common = [g for g in genres if g in personal_genres]
@@ -194,7 +250,14 @@ class PersonalRecommenderAgent(agent.Agent):
                     personal_artists[random.randrange(len(personal_artists))] = artist
 
     class SendPopularRecommendationRequest(OneShotBehaviour):
+        """
+        Clase que representa PeticiónRecomendacionesPopulares
+        """
         async def run(self):
+            """
+            Este método pide al recomendador popular las canciones en tendencia de otros usuarios
+            :return: devuelve la lista de artistas y géneros más buscados por el resto de usuarios, en formato JSON
+            """
             msg = Message(to="popular-recommender-musify@404.city")
             msg.set_metadata("performative", "query")
             msg.body = self.user
@@ -203,6 +266,9 @@ class PersonalRecommenderAgent(agent.Agent):
             self.exit_code = popular_recommendation.body
 
     async def setup(self):
+        """
+        Inicializa el recomendador personal, con su api de spotify y la petición para guardar etiquetas
+        """
         print("Personal recommender agent started")
         SPOTIPY_CLIENT_ID = '63cd1c05a2de40b19d4316d23e5271bf'
         SPOTIPY_CLIENT_SECRET = 'e0a096314a2946e4ab0c5a73f9fdd4cd'
@@ -216,8 +282,18 @@ class PersonalRecommenderAgent(agent.Agent):
 
 
 class PopularRecommenderAgent(agent.Agent):
+    """
+    Clase que representa al recomendador popular
+    """
     class ReceivePopularRecommendationRequest(OneShotBehaviour):
+        """
+        Clase que representa RecibirPeticionRecomendacionesPopulares
+        """
         async def run(self):
+            """
+            Entrena las etiquetas de otros usuarios, para luego poder recoger los artistas y géneros más buscados
+            :return: lista de géneros y artistas más buscados, en formato JSON
+            """
             user = await self.receive(timeout=90)
             msg = Message(to="personal-recommender-musify@404.city")
             msg.set_metadata("performative", "inform")
@@ -227,6 +303,9 @@ class PopularRecommenderAgent(agent.Agent):
             await self.send(msg)
 
     async def setup(self):
+        """
+        Inicializa el recomendador popular, junto con la petición para entrenar recomendaciones populares
+        """
         print("Popular recommender agent started")
         b = self.ReceivePopularRecommendationRequest()
         template = Template()
@@ -236,6 +315,14 @@ class PopularRecommenderAgent(agent.Agent):
 
 @database_sync_to_async
 def do_recommendation_train(tag, actual_user, recommender_type):
+    """
+    Método que realiza el entrenamiento de etiquetas, tanto para el recomendador personal como para el
+    popular. Dependiendo de la etiqueta, se realizará el entrenamiento de los artistas ó los géneros más buscados
+    :param tag: artista ó género
+    :param actual_user: el usuario que está realizando la petición de recomendaciones
+    :param recommender_type: popular ó personal
+    :return: devuelve una lista de artistas más buscados ó géneros más buscados
+    """
     dataset = []
     tags = []
     users = []
