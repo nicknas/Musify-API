@@ -5,5 +5,5 @@ spade
 pandas
 numpy
 scikit-learn
-tensorflow == 1.15
+tensorflow==1.15
 channels
