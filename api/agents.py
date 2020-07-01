@@ -31,18 +31,42 @@ class ChatbotAgent(agent.Agent):
             else:
                 self.exit_code = "No se han podido generar recomendaciones"
 
-    class SendSongTagsSave(OneShotBehaviour):
+    class SendSongTagsSaveRequest(OneShotBehaviour):
         async def run(self):
-            msg = Message(to="personal-recommender-musify@404.city")
-            msg.set_metadata("performative", "query")
-            msg.body = json.dumps({'user': self.user, 'user_input': self.user_input})
-            await self.send(msg)
-            response_save_tags = await self.receive(timeout=90)
-            self.exit_code = response_save_tags.body
+            client = dialogflow_v2.SessionsClient.from_service_account_json(
+                'dialog_flow_credentials/musifychatbot-qkmsfp-64a945d16557.json')
+            session = client.session_path('musifychatbot-qkmsfp', self.user + '-musify_api')
+            text_input = dialogflow_v2.types.TextInput(text=self.user_input, language_code='es-ES')
+            query_input = dialogflow_v2.types.QueryInput(text=text_input)
+
+            try:
+                response_chatbot = client.detect_intent(session=session, query_input=query_input)
+                input = self.user_input
+                msg = Message(to="personal-recommender-musify@404.city")
+                msg.set_metadata("performative", "query")
+                if response_chatbot.query_result.intent.display_name == 'Recoger cancion v2':
+                    input = response_chatbot.query_result.parameters.fields["song"].string_value
+                if response_chatbot.query_result.intent.display_name == 'Recoger album v2':
+                    input = response_chatbot.query_result.parameters.fields["disco"].string_value
+                    print(input)
+                if response_chatbot.query_result.intent.display_name == 'Recoger artista v2':
+                    input = response_chatbot.query_result.parameters.fields["cantante"].string_value
+
+                response = response_chatbot.query_result.fulfillment_text
+                msg.body = json.dumps({'user': self.user,
+                                       'user_input': input,
+                                       'intent': response_chatbot.query_result.intent.display_name,
+                                       'response': response})
+                await self.send(msg)
+                response_save_tags = await self.receive(timeout=90)
+                self.exit_code = json.dumps({"intent": response_chatbot.query_result.intent.display_name,
+                                             "response": response_save_tags.body})
+            except InvalidArgument:
+                self.exit_code = json.dumps({"error": "Unrecognized exception"})
 
     async def setup(self):
         print("Chatbot agent started")
-        self.request_save_song_tags = self.SendSongTagsSave()
+        self.request_save_song_tags = self.SendSongTagsSaveRequest()
         self.request_recommendation = self.SendPersonalRecommenderRequest()
 
 
@@ -58,95 +82,82 @@ class PersonalRecommenderAgent(agent.Agent):
         async def run(self):
             song_tags_request_message = await self.receive(timeout=90)
             song_tags_request = json.loads(song_tags_request_message.body)
-            client = dialogflow_v2.SessionsClient.from_service_account_json(
-                'dialog_flow_credentials/musifychatbot-qkmsfp-64a945d16557.json')
-            session = client.session_path('musifychatbot-qkmsfp', song_tags_request['user'] + '-musify_api')
-            text_input = dialogflow_v2.types.TextInput(text=song_tags_request['user_input'], language_code='es-ES')
-            query_input = dialogflow_v2.types.QueryInput(text=text_input)
-            SPOTIPY_CLIENT_ID = '63cd1c05a2de40b19d4316d23e5271bf'
-            SPOTIPY_CLIENT_SECRET = 'e0a096314a2946e4ab0c5a73f9fdd4cd'
-            spotify = spotipy.Spotify(client_credentials_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID,
-                                                                                          client_secret=SPOTIPY_CLIENT_SECRET))
-            try:
-                response_chatbot = client.detect_intent(session=session, query_input=query_input)
-                if response_chatbot.query_result.intent.display_name == 'Recoger canción':
-                    results = spotify.search(q='track:' + song_tags_request['user_input'], type='track', limit=10)
-                    if len(results['tracks']['items']) == 0:
-                        response_chatbot.query_result.fulfillment_text = "No he podido encontrar canciones para la canción que has puesto"
-                    for track in results['tracks']['items']:
-                        response_chatbot.query_result.fulfillment_text += '\n -' + track['name'] + ' del álbum ' + \
-                                                                          track['album']['name'] + ' y artista ' + \
-                                                                          track['artists'][0]['name']
-                        artist_full = spotify.artist(track['artists'][0]['uri'])
-                        available_genres = spotify.recommendation_genre_seeds()['genres']
-                        genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
-                                  genre.replace(" ", "-") in available_genres]
+            user = song_tags_request['user']
+            user_input = song_tags_request['user_input']
+            intent = song_tags_request['intent']
+            response = song_tags_request['response']
 
-                        if len(genres) > 0:
-                            await self.save_song_tag(song=track['id'], artist=track['artists'][0]['id'],
-                                                     genre=genres[0],
-                                                     release_year=track['album']['release_date'],
-                                                     user=song_tags_request['user'])
+            if intent == 'Recoger canción' or intent == 'Recoger cancion v2':
+                results = self.agent.spotify_api.search(q='track:' + user_input, type='track', limit=10)
+                if len(results['tracks']['items']) == 0:
+                    response = "No he podido encontrar canciones para la canción que has puesto"
+                for track in results['tracks']['items']:
+                    response += '\n -' + track['name'] + ' del álbum ' + \
+                                track['album']['name'] + ' y artista ' + \
+                                track['artists'][0]['name']
+                    artist_full = self.agent.spotify_api.artist(track['artists'][0]['uri'])
+                    available_genres = self.agent.spotify_api.recommendation_genre_seeds()['genres']
+                    genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
+                              genre.replace(" ", "-") in available_genres]
 
-                if response_chatbot.query_result.intent.display_name == 'Recoger artista':
-                    results = spotify.search(q='artist:' + song_tags_request['user_input'], type='artist')
-                    if len(results['artists']['items']) == 0:
-                        response_chatbot.query_result.fulfillment_text = "No he podido encontrar canciones para el artista que has puesto"
+                    if len(genres) > 0:
+                        await self.save_song_tag(song=track['id'], artist=track['artists'][0]['id'],
+                                                 genre=genres[0],
+                                                 release_year=track['album']['release_date'],
+                                                 user=user)
 
-                    else:
-                        artist = results['artists']['items'][0]
-                        for album in spotify.artist_albums(artist['uri'], album_type='album', limit=1)['items']:
-                            for track in spotify.album_tracks(album['uri'], limit=10)['items']:
-                                response_chatbot.query_result.fulfillment_text += '\n -' + track[
-                                    'name'] + ' del álbum ' + \
-                                                                                  album['name'] + ' y artista ' + \
-                                                                                  artist['name']
-                                artist_full = spotify.artist(artist['uri'])
-                                print(artist_full['genres'])
-                                available_genres = spotify.recommendation_genre_seeds()['genres']
-                                genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
-                                          genre.replace(" ", "-") in available_genres]
+            if intent == 'Recoger artista' or intent == 'Recoger artista v2':
+                results = self.agent.spotify_api.search(q='artist:' + user_input, type='artist')
+                if len(results['artists']['items']) == 0:
+                    response = "No he podido encontrar canciones para el artista que has puesto"
 
-                                if len(genres) > 0:
-                                    await self.save_song_tag(song=track['id'], artist=artist['id'],
-                                                             genre=genres[0],
-                                                             release_year=album['release_date'],
-                                                             user=song_tags_request['user'])
+                else:
+                    artist = results['artists']['items'][0]
+                    for album in self.agent.spotify_api.artist_albums(artist['uri'], album_type='album', limit=1)['items']:
+                        for track in self.agent.spotify_api.album_tracks(album['uri'], limit=10)['items']:
+                            response += '\n -' + track[
+                                'name'] + ' del álbum ' + \
+                                        album['name'] + ' y artista ' + \
+                                        artist['name']
+                            artist_full = self.agent.spotify_api.artist(artist['uri'])
+                            print(artist_full['genres'])
+                            available_genres = self.agent.spotify_api.recommendation_genre_seeds()['genres']
+                            genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
+                                      genre.replace(" ", "-") in available_genres]
 
-                if response_chatbot.query_result.intent.display_name == 'Recoger album':
-                    results = spotify.search(q='album:' + song_tags_request['user_input'], type='album', limit=1)
-                    if len(results['albums']['items']) == 0:
-                        response_chatbot.query_result.fulfillment_text = "No he podido encontrar canciones para el álbum que has puesto"
-                    else:
-                        for album in results['albums']['items']:
-                            for track in spotify.album_tracks(album['uri'], limit=10)['items']:
-                                response_chatbot.query_result.fulfillment_text += '\n -' + track[
-                                    'name'] + ' del álbum ' + \
-                                                                                  album[
-                                                                                      'name'] + ' y artista ' + \
-                                                                                  album['artists'][0]['name']
-                                artist_full = spotify.artist(album['artists'][0]['uri'])
-                                available_genres = spotify.recommendation_genre_seeds()['genres']
-                                genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
-                                          genre.replace(" ", "-") in available_genres]
+                            if len(genres) > 0:
+                                await self.save_song_tag(song=track['id'], artist=artist['id'],
+                                                         genre=genres[0],
+                                                         release_year=album['release_date'],
+                                                         user=user)
 
-                                if len(genres) > 0:
-                                    await self.save_song_tag(song=track['id'], artist=album['artists'][0]['id'],
-                                                             genre=genres[0],
-                                                             release_year=album['release_date'],
-                                                             user=song_tags_request['user'])
+            if intent == 'Recoger album' or intent == 'Recoger album v2':
+                results = self.agent.spotify_api.search(q='album:' + user_input, type='album', limit=1)
+                if len(results['albums']['items']) == 0:
+                    response = "No he podido encontrar canciones para el álbum que has puesto"
+                else:
+                    for album in results['albums']['items']:
+                        for track in self.agent.spotify_api.album_tracks(album['uri'], limit=10)['items']:
+                            response += '\n -' + track[
+                                'name'] + ' del álbum ' + \
+                                        album[
+                                            'name'] + ' y artista ' + \
+                                        album['artists'][0]['name']
+                            artist_full = self.agent.spotify_api.artist(album['artists'][0]['uri'])
+                            available_genres = self.agent.spotify_api.recommendation_genre_seeds()['genres']
+                            genres = [genre.replace(" ", "-") for genre in artist_full['genres'] if
+                                      genre.replace(" ", "-") in available_genres]
 
-                msg = Message(to="chatbot-musify@404.city")
-                msg.set_metadata("performative", "inform")
-                msg.body = json.dumps({'intent': response_chatbot.query_result.intent.display_name,
-                                       'response': response_chatbot.query_result.fulfillment_text})
-                await self.send(msg)
+                            if len(genres) > 0:
+                                await self.save_song_tag(song=track['id'], artist=album['artists'][0]['id'],
+                                                         genre=genres[0],
+                                                         release_year=album['release_date'],
+                                                         user=user)
 
-            except InvalidArgument:
-                msg = Message(to="chatbot-musify@404.city")
-                msg.set_metadata("performative", "inform")
-                msg.body = json.dumps({"error": "Unrecognized exception"})
-                await self.send(msg)
+            msg = Message(to="chatbot-musify@404.city")
+            msg.set_metadata("performative", "inform")
+            msg.body = response
+            await self.send(msg)
 
             receive_personal_recommendation_request = PersonalRecommenderAgent.ReceivePersonalRecommendationRequest()
             template = Template()
@@ -193,6 +204,11 @@ class PersonalRecommenderAgent(agent.Agent):
 
     async def setup(self):
         print("Personal recommender agent started")
+        SPOTIPY_CLIENT_ID = '63cd1c05a2de40b19d4316d23e5271bf'
+        SPOTIPY_CLIENT_SECRET = 'e0a096314a2946e4ab0c5a73f9fdd4cd'
+        self.spotify_api = spotipy.Spotify(
+            client_credentials_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID,
+                                                                client_secret=SPOTIPY_CLIENT_SECRET))
         b = self.ReceiveSaveSongTagsRequest()
         template = Template()
         template.set_metadata("performative", "query")
